@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>港口集群对讲调度台</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "PingFang SC", sans-serif; background: #0f1419;
+         color: #d7e0ea; padding: 16px; }
+  h1 { font-size: 18px; margin-bottom: 4px; }
+  .bar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px;
+         flex-wrap: wrap; }
+  .bar .clock { color: #7d8ea0; font-size: 13px; }
+  button { background: #1f6feb; color: #fff; border: 0; border-radius: 6px;
+           padding: 6px 14px; cursor: pointer; font-size: 13px; }
+  button:hover { background: #2f7bf6; }
+  button.danger { background: #b3362b; }
+  button.danger:hover { background: #d04437; }
+  button:disabled { background: #33404e; cursor: default; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+          gap: 12px; margin-bottom: 18px; }
+  .card { background: #171e26; border: 1px solid #2a3542; border-radius: 10px;
+          padding: 12px 14px; }
+  .card.emergency { border-color: #d04437; box-shadow: 0 0 10px #d0443755; }
+  .card.active { border-color: #1f6feb; }
+  .card h3 { font-size: 15px; display: flex; justify-content: space-between;
+             align-items: center; }
+  .tag { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #26313d;
+         color: #8fa3b8; }
+  .tag.emg { background: #d04437; color: #fff; }
+  .tag.merged { background: #6e4fc1; color: #fff; }
+  .holder { margin: 10px 0 6px; font-size: 14px; }
+  .holder .who { color: #4ade80; font-weight: 600; }
+  .holder .none { color: #5b6b7c; }
+  .queue { font-size: 13px; color: #e8c468; }
+  .queue ol { display: flex; gap: 6px; list-style: none; flex-wrap: wrap; margin-top: 4px; }
+  .queue li { background: #2a2a1e; border: 1px solid #5a4d1e; border-radius: 5px;
+              padding: 2px 8px; }
+  .meta { color: #7d8ea0; font-size: 12px; margin-top: 8px; }
+  .card .ops { margin-top: 10px; display: flex; gap: 8px; align-items: center; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th, td { padding: 4px 8px; border-bottom: 1px solid #232d38; text-align: left;
+           white-space: nowrap; }
+  th { color: #7d8ea0; position: sticky; top: 0; background: #171e26; }
+  .terminals { max-height: 420px; overflow: auto; background: #171e26;
+               border: 1px solid #2a3542; border-radius: 10px; }
+  .off { color: #5b6b7c; }
+  .merges { margin-bottom: 14px; font-size: 13px; display: flex; gap: 10px;
+            flex-wrap: wrap; }
+  .merge-chip { background: #2a2140; border: 1px solid #6e4fc1; border-radius: 8px;
+                padding: 6px 10px; display: flex; gap: 8px; align-items: center; }
+  .merge-chip button { padding: 2px 10px; font-size: 12px; }
+  h2 { font-size: 14px; color: #8fa3b8; margin: 6px 0 8px; }
+  input[type=checkbox] { accent-color: #1f6feb; }
+</style>
+</head>
+<body>
+<h1>港口数字集群对讲 · 调度台</h1>
+<div class="bar">
+  <span class="clock" id="clock">—</span>
+  <button id="mergeBtn" disabled>并组(勾选≥2个组)</button>
+  <span style="color:#5b6b7c;font-size:12px">勾选组卡片后可并组;紧急组红色高亮</span>
+</div>
+<div class="merges" id="merges"></div>
+<div class="grid" id="groups"></div>
+<h2>终端(<span id="tcount">0</span>部) — 当前收听组</h2>
+<div class="terminals">
+  <table>
+    <thead><tr><th>终端</th><th>名称</th><th>优先级</th><th>旋钮组</th>
+    <th>正在听</th><th>状态</th></tr></thead>
+    <tbody id="tb"></tbody>
+  </table>
+</div>
+<script>
+const selected = new Set();
+
+async function refresh() {
+  try {
+    const s = await (await fetch("/api/state")).json();
+    render(s);
+  } catch (e) { /* 服务重启中等下一次 */ }
+}
+
+function render(s) {
+  document.getElementById("clock").textContent =
+    "逻辑时钟 " + (s.now / 1000).toFixed(1) + "s · 组 " + s.groups.length +
+    " · 并组 " + Object.keys(s.merges).length;
+
+  // 并组 chips
+  const mg = document.getElementById("merges");
+  mg.innerHTML = "";
+  for (const [mid, gids] of Object.entries(s.merges)) {
+    const chip = document.createElement("div");
+    chip.className = "merge-chip";
+    chip.innerHTML = `<span>🔗 ${mid}: ${gids.join(" + ")}</span>`;
+    const btn = document.createElement("button");
+    btn.textContent = "拆组";
+    btn.className = "danger";
+    btn.onclick = () => act({op: "unmerge", mid});
+    chip.appendChild(btn);
+    mg.appendChild(chip);
+  }
+
+  // 组卡片
+  const gd = document.getElementById("groups");
+  gd.innerHTML = "";
+  for (const g of s.groups) {
+    const c = g.call;
+    const card = document.createElement("div");
+    card.className = "card" + (c ? (c.emergency ? " emergency" : " active") : "");
+    const tags = [`<span class="tag">${g.floor_mode === "queue" ? "排队" : "拒绝"}</span>`];
+    if (c && c.emergency) tags.push(`<span class="tag emg">紧急</span>`);
+    if (c && c.merge_id) tags.push(`<span class="tag merged">并组 ${c.merge_id}</span>`);
+    const holder = c && c.holder
+      ? `<span class="who">🎙 ${c.holder}</span>` : `<span class="none">空闲</span>`;
+    const queue = c && c.queue.length
+      ? `<div class="queue">等话权 ${c.queue.length} 人:<ol>${
+          c.queue.map((t, i) => `<li>${i + 1}. ${t}</li>`).join("")}</ol></div>` : "";
+    card.innerHTML = `
+      <h3><label><input type="checkbox" data-gid="${g.gid}"
+        ${selected.has(g.gid) ? "checked" : ""}> ${g.name} (${g.gid})</label>
+        <span>${tags.join(" ")}</span></h3>
+      <div class="holder">${c ? "话权: " + holder : "无呼叫"}</div>
+      ${queue}
+      <div class="meta">${c ? "在线参与者 " + c.participants.length + " 人" : ""}</div>
+      <div class="ops">
+        <button class="danger" ${c && c.holder ? "" : "disabled"}
+          data-gid="${g.gid}">强拆话权</button>
+      </div>`;
+    card.querySelector("input").onchange = (ev) => {
+      ev.target.checked ? selected.add(g.gid) : selected.delete(g.gid);
+      updateMergeBtn();
+    };
+    card.querySelector("button").onclick = () =>
+      act({op: "force_release", gid: g.gid});
+    gd.appendChild(card);
+  }
+
+  // 终端表
+  document.getElementById("tcount").textContent = s.terminals.length;
+  document.getElementById("tb").innerHTML = s.terminals.map(t => `
+    <tr class="${t.powered ? "" : "off"}">
+      <td>${t.tid}</td><td>${t.name}</td><td>${t.priority}</td>
+      <td>${t.active_group || "—"}</td>
+      <td>${t.listening ? "🔊 " + t.listening : "—"}</td>
+      <td>${t.powered ? "在线" : "关机"}</td>
+    </tr>`).join("");
+}
+
+function updateMergeBtn() {
+  document.getElementById("mergeBtn").disabled = selected.size < 2;
+}
+
+document.getElementById("mergeBtn").onclick = async () => {
+  await act({op: "merge", gids: [...selected]});
+  selected.clear();
+  updateMergeBtn();
+};
+
+async function act(payload) {
+  await fetch("/api/action", {method: "POST", body: JSON.stringify(payload)});
+  refresh();
+}
+
+setInterval(refresh, 800);
+refresh();
+</script>
+</body>
+</html>
